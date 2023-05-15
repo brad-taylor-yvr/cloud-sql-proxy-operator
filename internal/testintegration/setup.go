@@ -114,9 +114,8 @@ func EnvTestSetup() (*EnvTestHarness, error) {
 		testEnvCancel: cancel,
 		cfg:           cfg,
 	}
-
 	if err != nil {
-		return nil, fmt.Errorf("unable to start kuberenetes envtest %v", err)
+		return mh, fmt.Errorf("unable to start kuberenetes envtest %v", err)
 	}
 
 	// Initialize rest client configuration
