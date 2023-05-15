@@ -32,14 +32,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// defaultClient holds the k8s client for the default ManagerHarness which is
+// defaultClient holds the k8s client for the default EnvTestHarness which is
 // shared among tests that do not mess with the manager's lifecycle.
 var defaultClient client.Client
 
 func TestMain(m *testing.M) {
-	// start up a shared ManagerHarness to be reused across test cases that do not
+	// start up a shared EnvTestHarness to be reused across test cases that do not
 	// impact the lifecycle of the manager. This makes tests cases more efficient
-	// because it takes 2-3 minutes to start up a new ManagerHarness.
+	// because it takes 2-3 minutes to start up a new EnvTestHarness.
 	var err error
 	mth, err := testintegration.EnvTestSetup()
 

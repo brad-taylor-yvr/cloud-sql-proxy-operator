@@ -77,7 +77,7 @@ func runSetupEnvtest() (string, error) {
 // EnvTestSetup sets up the envtest environment for a testing package.
 // This is intended to be called from `func TestMain(m *testing.M)` so
 // that the environment is configured before
-func EnvTestSetup() (*ManagerHarness, error) {
+func EnvTestSetup() (*EnvTestHarness, error) {
 	var err error
 
 	ctrl.SetLogger(Log)
@@ -106,23 +106,21 @@ func EnvTestSetup() (*ManagerHarness, error) {
 		},
 	}
 
-	mh := &ManagerHarness{
+	// Start the testenv
+	cfg, err := testEnv.Start()
+	mh := &EnvTestHarness{
 		testEnvCtx:    ctx,
 		testEnv:       testEnv,
 		testEnvCancel: cancel,
-		s:             scheme.Scheme,
+		cfg:           cfg,
 	}
 
-	// Start the testenv
-	cfg, err := testEnv.Start()
 	if err != nil {
 		return nil, fmt.Errorf("unable to start kuberenetes envtest %v", err)
 	}
 
 	// Initialize rest client configuration
-	mh.cfg = cfg
-
-	// Initialize the Client
+	mh.s = scheme.Scheme
 	controller.InitScheme(mh.s)
 	cl, err := client.New(cfg, client.Options{Scheme: mh.s})
 	if err != nil {
@@ -142,9 +140,9 @@ func EnvTestSetup() (*ManagerHarness, error) {
 	return mh, nil
 }
 
-// ManagerHarness enables integration tests to control the lifecycle of the
+// EnvTestHarness enables integration tests to control the lifecycle of the
 // operator's controller-manager.
-type ManagerHarness struct {
+type EnvTestHarness struct {
 
 	// Mgr is the manager
 	Mgr ctrl.Manager
@@ -152,7 +150,7 @@ type ManagerHarness struct {
 	// Client is the kubernetes client.
 	Client client.Client
 
-	// The actual envTest
+	// The actual EnvTest environment
 	testEnv *envtest.Environment
 
 	// testEnvCancel is the context cancel function for the testEnv
@@ -176,7 +174,7 @@ type ManagerHarness struct {
 }
 
 // Teardown closes the TestEnv environment at the end of the testcase.
-func (h *ManagerHarness) Teardown() {
+func (h *EnvTestHarness) Teardown() {
 	if h.testEnvCancel != nil {
 		h.testEnvCancel()
 	}
@@ -190,7 +188,7 @@ func (h *ManagerHarness) Teardown() {
 
 // StopMgr stops the controller manager and waits for it to exit, returning an
 // error if the controller manager does not stop within 1 minute.
-func (h *ManagerHarness) StopMgr() error {
+func (h *EnvTestHarness) StopMgr() error {
 	if h.cancel != nil {
 		h.cancel()
 	}
@@ -204,7 +202,7 @@ func (h *ManagerHarness) StopMgr() error {
 }
 
 // StartMgr starts up the manager, configuring it with the proxyImage.
-func (h *ManagerHarness) StartMgr(proxyImage string) error {
+func (h *EnvTestHarness) StartMgr(proxyImage string) error {
 	h.ctx, h.cancel = context.WithCancel(h.testEnvCtx)
 
 	// start webhook server using Manager
@@ -223,12 +221,16 @@ func (h *ManagerHarness) StartMgr(proxyImage string) error {
 	h.Mgr = mgr
 
 	err = controller.SetupManagers(mgr, "cloud-sql-proxy-operator/dev", proxyImage)
-
 	if err != nil {
+
+		// Run the
 		return fmt.Errorf("unable to start kuberenetes envtest %v", err)
 	}
-	ch := make(chan int)
+
+	// Run the manager in a goroutine, close the channel when the manager exits.
+	h.stopped = make(chan int)
 	go func() {
+		defer close(h.stopped)
 		Log.Info("Starting controller manager.")
 		err = mgr.Start(h.ctx)
 		if err != nil {
@@ -236,13 +238,11 @@ func (h *ManagerHarness) StartMgr(proxyImage string) error {
 			return
 		}
 		Log.Info("Manager exited normally.")
-		close(ch)
 	}()
 
-	// wait for the controller manager webhook server to get ready
+	// Wait for the controller manager webhook server to get ready.
 	dialer := &net.Dialer{Timeout: time.Second}
 	addrPort := fmt.Sprintf("%s:%d", o.LocalServingHost, o.LocalServingPort)
-
 	err = testhelpers.RetryUntilSuccess(10, time.Second, func() error {
 
 		// whyNoLint:Ignore InsecureSkipVerify warning, this is only for local testing.
@@ -260,7 +260,6 @@ func (h *ManagerHarness) StartMgr(proxyImage string) error {
 		return fmt.Errorf("unable to connect to manager %v", err)
 	}
 
-	Log.Info("Setup complete. Webhook server started.")
-
+	Log.Info("Setup complete. Manager started.")
 	return nil
 }
