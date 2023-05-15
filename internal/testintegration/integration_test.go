@@ -32,25 +32,35 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// defaultClient holds the k8s client for the default ManagerHarness which is
+// shared among tests that do not mess with the manager's lifecycle.
+var defaultClient client.Client
+
 func TestMain(m *testing.M) {
-	teardown, err := testintegration.EnvTestSetup()
+	// start up a shared ManagerHarness to be reused across test cases that do not
+	// impact the lifecycle of the manager. This makes tests cases more efficient
+	// because it takes 2-3 minutes to start up a new ManagerHarness.
+	var err error
+	mth, err := testintegration.EnvTestSetup()
 
 	if err != nil {
 		testintegration.Log.Error(err, "errors while initializing kubernetes cluster")
-		if teardown != nil {
-			teardown()
-		}
+		mth.Teardown()
 		os.Exit(1)
 	}
 
+	defaultClient = mth.Client
+
 	code := m.Run()
-	teardown()
+	mth.Teardown()
 	os.Exit(code)
 }
 
-func newTestCaseClient(name string) *testhelpers.TestCaseClient {
+// newTestCaseClient Creates a new TestCaseClient providing unique namespace and
+// other default values.
+func newTestCaseClient(name string, c client.Client) *testhelpers.TestCaseClient {
 	return &testhelpers.TestCaseClient{
-		Client:           testintegration.Client,
+		Client:           c,
 		Namespace:        testhelpers.NewNamespaceName(name),
 		ConnectionString: "region:project:inst",
 	}
@@ -58,7 +68,7 @@ func newTestCaseClient(name string) *testhelpers.TestCaseClient {
 
 func TestCreateAndDeleteResource(t *testing.T) {
 	ctx := testintegration.TestContext()
-	tcc := newTestCaseClient("create")
+	tcc := newTestCaseClient("create", defaultClient)
 	res, err := tcc.CreateResource(ctx)
 	if err != nil {
 		t.Error(err)
@@ -76,7 +86,7 @@ func TestCreateAndDeleteResource(t *testing.T) {
 
 func TestModifiesNewDeployment(t *testing.T) {
 	ctx := testintegration.TestContext()
-	tcc := newTestCaseClient("modifynew")
+	tcc := newTestCaseClient("modifynew", defaultClient)
 
 	err := tcc.CreateOrPatchNamespace(ctx)
 	if err != nil {
@@ -133,7 +143,7 @@ func TestModifiesExistingDeployment(t *testing.T) {
 		deploymentAppLabel = "existing-mod"
 	)
 	ctx := testintegration.TestContext()
-	tcc := newTestCaseClient("modifyexisting")
+	tcc := newTestCaseClient("modifyexisting", defaultClient)
 
 	err := tcc.CreateOrPatchNamespace(ctx)
 	if err != nil {
@@ -199,9 +209,14 @@ func TestModifiesExistingDeployment(t *testing.T) {
 // automatically update the proxy container image on existing deployments.
 func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 	ctx := testintegration.TestContext()
-	tcc := newTestCaseClient("modifynew")
+	// Use a fresh Manager Harness because we are messing with the operator
+	// lifecycle.
+	mh, err := testintegration.EnvTestSetup()
+	defer mh.Teardown()
 
-	err := tcc.CreateOrPatchNamespace(ctx)
+	tcc := newTestCaseClient("updateimage", mh.Client)
+
+	err = tcc.CreateOrPatchNamespace(ctx)
 	if err != nil {
 		t.Fatalf("can't create namespace, %v", err)
 	}
@@ -257,7 +272,8 @@ func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 
 	// Restart the manager with a new default proxy image
 	const newDefault = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:999.9.9"
-	err = testintegration.RestartManager(newDefault)
+	mh.StopMgr()
+	err = mh.StartMgr(newDefault)
 	if err != nil {
 		t.Fatal("can't restart container", err)
 	}
@@ -296,6 +312,107 @@ func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 
 }
 
+// TestDeleteMisconfiguredPod is the test that
+// demonstrates that when a pod is created, and the webhook does not work, then
+// the PodDeleteController will attempt to delete the pod.
+func TestDeleteMisconfiguredPod(t *testing.T) {
+	ctx := testintegration.TestContext()
+
+	// Use a fresh Manager Harness because we are messing with the operator
+	// lifecycle.
+	mh, err := testintegration.EnvTestSetup()
+	defer mh.Teardown()
+	tcc := newTestCaseClient("deletemisconfig", mh.Client)
+
+	err = tcc.CreateOrPatchNamespace(ctx)
+	if err != nil {
+		t.Fatalf("can't create namespace, %v", err)
+	}
+
+	const (
+		pwlName            = "newdeploy"
+		deploymentAppLabel = "busybox"
+	)
+	key := types.NamespacedName{Name: pwlName, Namespace: tcc.Namespace}
+
+	t.Log("Creating AuthProxyWorkload")
+	_, err = tcc.CreateAuthProxyWorkload(ctx, key, deploymentAppLabel, tcc.ConnectionString, "Deployment")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	// Stop the manager before attempting to create the resources
+	mh.StopMgr()
+	t.Log("Manager is stopped")
+
+	t.Log("Creating deployment")
+	d := testhelpers.BuildDeployment(key, deploymentAppLabel)
+	err = tcc.CreateWorkload(ctx, d)
+	if err != nil {
+		t.Error("unable to create deployment", err)
+		return
+	}
+
+	t.Log("Creating deployment replicas")
+	rs, pl, err := tcc.CreateDeploymentReplicaSetAndPods(ctx, d)
+	if err != nil {
+		t.Error("unable to create pods", err)
+		return
+	}
+
+	// Check that proxy container was not added to pods, because the manager is stopped
+	err = tcc.ExpectPodContainerCount(ctx, d.Spec.Selector, 1, "all")
+	if err != nil {
+		t.Error(err)
+	}
+
+	pods, err := testhelpers.ListPods(ctx, tcc.Client, tcc.Namespace, d.Spec.Selector)
+	if len(pods.Items) == 0 {
+		t.Fatal("No pods found")
+	}
+
+	t.Log("Restarting the manager...")
+	// Start the manager
+	err = mh.StartMgr(workload.DefaultProxyImage)
+	if err != nil {
+		t.Fatal("can't restart container", err)
+	}
+
+	// Expect that old pods are deleted
+	err = testhelpers.RetryUntilSuccess(24, testhelpers.DefaultRetryInterval, func() error {
+		pods, err := testhelpers.ListPods(ctx, tcc.Client, tcc.Namespace, d.Spec.Selector)
+		if err != nil {
+			return err
+		}
+		var podCount int
+		for _, pod := range pods.Items {
+			if !pod.GetDeletionTimestamp().IsZero() {
+				podCount++
+			}
+		}
+		if podCount > 0 {
+			return fmt.Errorf("got %v, want 0 pods that are not yet deleted", podCount)
+		}
+		return nil
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Recreate the ReplicaSet and Pods as would happen when the deployment
+	// PodTemplate changed.
+	err = recreatePodsAfterDeploymentUpdate(ctx, tcc, d, rs, pl)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+}
+
+// recreatePodsAfterDeploymentUpdate acts like the DeploymentController, when
+// the Deployment is updated. It deletes the old ReplicaSet and Pods, and
+// creates a new ReplicaSet and Pods.
 func recreatePodsAfterDeploymentUpdate(ctx context.Context, tcc *testhelpers.TestCaseClient, d *appsv1.Deployment, rs1 *appsv1.ReplicaSet, pods []*corev1.Pod) error {
 	// Then we simulate the deployment pods being replaced
 	err := tcc.Client.Delete(ctx, rs1)
