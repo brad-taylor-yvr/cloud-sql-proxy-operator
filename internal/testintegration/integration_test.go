@@ -209,12 +209,12 @@ func TestModifiesExistingDeployment(t *testing.T) {
 // automatically update the proxy container image on existing deployments.
 func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 	ctx := testintegration.TestContext()
-	// Use a fresh Manager Harness because we are messing with the operator
+	// Use a fresh EnvTestHarness because we are messing with the operator
 	// lifecycle.
-	mh, err := testintegration.EnvTestSetup()
-	defer mh.Teardown()
+	th, err := testintegration.EnvTestSetup()
+	defer th.Teardown()
 
-	tcc := newTestCaseClient("updateimage", mh.Client)
+	tcc := newTestCaseClient("updateimage", th.Client)
 
 	err = tcc.CreateOrPatchNamespace(ctx)
 	if err != nil {
@@ -230,14 +230,14 @@ func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 	t.Log("Creating AuthProxyWorkload")
 	p, err := tcc.CreateAuthProxyWorkload(ctx, key, deploymentAppLabel, tcc.ConnectionString, "Deployment")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 		return
 	}
 
 	t.Log("Waiting for AuthProxyWorkload operator to begin the reconcile loop")
 	_, err = tcc.GetAuthProxyWorkloadAfterReconcile(ctx, key)
 	if err != nil {
-		t.Error("unable to create AuthProxyWorkload", err)
+		t.Fatal("unable to create AuthProxyWorkload", err)
 		return
 	}
 
@@ -245,21 +245,21 @@ func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 	d := testhelpers.BuildDeployment(key, deploymentAppLabel)
 	err = tcc.CreateWorkload(ctx, d)
 	if err != nil {
-		t.Error("unable to create deployment", err)
+		t.Fatal("unable to create deployment", err)
 		return
 	}
 
 	t.Log("Creating deployment replicas")
 	rs, pl, err := tcc.CreateDeploymentReplicaSetAndPods(ctx, d)
 	if err != nil {
-		t.Error("unable to create pods", err)
+		t.Fatal("unable to create pods", err)
 		return
 	}
 
 	// Check that proxy container was added to pods
 	err = tcc.ExpectPodContainerCount(ctx, d.Spec.Selector, 2, "all")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	// Check that the pods have the expected default proxy image
@@ -272,8 +272,8 @@ func TestUpdateWorkloadContainerWhenDefaultProxyImageChanges(t *testing.T) {
 
 	// Restart the manager with a new default proxy image
 	const newDefault = "gcr.io/cloud-sql-connectors/cloud-sql-proxy:999.9.9"
-	mh.StopMgr()
-	err = mh.StartMgr(newDefault)
+	th.StopMgr()
+	err = th.StartMgr(newDefault)
 	if err != nil {
 		t.Fatal("can't restart container", err)
 	}
@@ -320,9 +320,9 @@ func TestDeleteMisconfiguredPod(t *testing.T) {
 
 	// Use a fresh Manager Harness because we are messing with the operator
 	// lifecycle.
-	mh, err := testintegration.EnvTestSetup()
-	defer mh.Teardown()
-	tcc := newTestCaseClient("deletemisconfig", mh.Client)
+	th, err := testintegration.EnvTestSetup()
+	defer th.Teardown()
+	tcc := newTestCaseClient("deletemisconfig", th.Client)
 
 	err = tcc.CreateOrPatchNamespace(ctx)
 	if err != nil {
@@ -343,28 +343,28 @@ func TestDeleteMisconfiguredPod(t *testing.T) {
 	}
 
 	// Stop the manager before attempting to create the resources
-	mh.StopMgr()
+	th.StopMgr()
 	t.Log("Manager is stopped")
 
 	t.Log("Creating deployment")
 	d := testhelpers.BuildDeployment(key, deploymentAppLabel)
 	err = tcc.CreateWorkload(ctx, d)
 	if err != nil {
-		t.Error("unable to create deployment", err)
+		t.Fatal("unable to create deployment", err)
 		return
 	}
 
 	t.Log("Creating deployment replicas")
 	rs, pl, err := tcc.CreateDeploymentReplicaSetAndPods(ctx, d)
 	if err != nil {
-		t.Error("unable to create pods", err)
+		t.Fatal("unable to create pods", err)
 		return
 	}
 
 	// Check that proxy container was not added to pods, because the manager is stopped
 	err = tcc.ExpectPodContainerCount(ctx, d.Spec.Selector, 1, "all")
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
 
 	pods, err := testhelpers.ListPods(ctx, tcc.Client, tcc.Namespace, d.Spec.Selector)
@@ -374,7 +374,7 @@ func TestDeleteMisconfiguredPod(t *testing.T) {
 
 	t.Log("Restarting the manager...")
 	// Start the manager
-	err = mh.StartMgr(workload.DefaultProxyImage)
+	err = th.StartMgr(workload.DefaultProxyImage)
 	if err != nil {
 		t.Fatal("can't restart container", err)
 	}
